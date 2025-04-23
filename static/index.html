@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AI Agent Platform</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div>TEST</div>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    function App() {
+      const [agents, setAgents] = useState([]);
+      const [messages, setMessages] = useState([]);
+      const [newAgent, setNewAgent] = useState({ name: "", behavior: { onMessage: "", action: "", value: "" } });
+      const [ws, setWs] = useState(null);
+
+      // Fetch agents and messages
+      useEffect(() => {
+        fetch("/api/agents")
+          .then(res => res.json())
+          .then(data => setAgents(data));
+        fetch("/api/messages")
+          .then(res => res.json())
+          .then(data => setMessages(data));
+
+        // Connect to WebSocket
+        const websocket = new WebSocket("ws://" + window.location.host + "/ws");
+        websocket.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.type === "agent_created") {
+            setAgents(prev => [...prev, data.agent]);
+          } else if (data.type === "message") {
+            setMessages(prev => [...prev, data.message]);
+          }
+        };
+        setWs(websocket);
+        return () => websocket.close();
+      }, []);
+
+      // Create a new agent
+      const createAgent = () => {
+        fetch("/api/agents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(newAgent),
+        }).then(() => {
+          setNewAgent({ name: "", behavior: { onMessage: "", action: "", value: "" } });
+        });
+      };
+
+      // Send a message
+      const sendMessage = (receiver_id) => {
+        fetch("/api/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_id: "user", receiver_id, content: { type: "ping" } }),
+        });
+      };
+
+      return (
+        <div className="p-4 max-w-4xl mx-auto">
+          <h1 className="text-2xl font-bold mb-4">AI Agent Platform</h1>
+          
+          {/* Agent Creation */}
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold">Create Agent</h2>
+            <input
+              type="text"
+              placeholder="Agent Name"
+              value={newAgent.name}
+              onChange={e => setNewAgent({ ...newAgent, name: e.target.value })}
+              className="border p-2 mr-2"
+            />
+            <input
+              type="text"
+              placeholder="On Message (e.g., ping)"
+              value={newAgent.behavior.onMessage}
+              onChange={e => setNewAgent({ ...newAgent, behavior: { ...newAgent.behavior, onMessage: e.target.value } })}
+              className="border p-2 mr-2"
+            />
+            <input
+              type="text"
+              placeholder="Action (e.g., respond)"
+              value={newAgent.behavior.action}
+              onChange={e => setNewAgent({ ...newAgent, behavior: { ...newAgent.behavior, action: e.target.value } })}
+              className="border p-2 mr-2"
+            />
+            <input
+              type="text"
+              placeholder="Value (e.g., pong)"
+              value={newAgent.behavior.value}
+              onChange={e => setNewAgent({ ...newAgent, behavior: { ...newAgent.behavior, value: e.target.value } })}
+              className="border p-2 mr-2"
+            />
+            <button onClick={createAgent} className="bg-blue-500 text-white p-2 rounded">Create</button>
+          </div>
+
+          {/* Agent List */}
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold">Agents</h2>
+            <ul>
+              {agents.map(agent => (
+                <li key={agent.id} className="border p-2 mb-2">
+                  <strong>{agent.name}</strong>
+                  <pre>{JSON.stringify(agent.behavior, null, 2)}</pre>
+                  <button
+                    onClick={() => sendMessage(agent.id)}
+                    className="bg-green-500 text-white p-1 rounded"
+                  >
+                    Send Ping
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Message Log */}
+          <div>
+            <h2 className="text-xl font-semibold">Messages</h2>
+            <ul>
+              {messages.map(msg => (
+                <li key={msg.id} className="border p-2 mb-2">
+                  <strong>From:</strong> {msg.sender_id} <strong>To:</strong> {msg.receiver_id}
+                  <pre>{JSON.stringify(msg.content, null, 2)}</pre>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById("root"));
+  </script>
+</body>
+</html>
