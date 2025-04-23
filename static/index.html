@@ -4,10 +4,11 @@
   <title>AI Agent Platform</title>
   <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Add Babel standalone -->
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body>
-    <div>TEST</div>
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect } = React;
@@ -20,25 +21,36 @@
 
       // Fetch agents and messages
       useEffect(() => {
+        // Add error handling for API calls
         fetch("/api/agents")
           .then(res => res.json())
-          .then(data => setAgents(data));
+          .then(data => setAgents(data))
+          .catch(err => console.error("Error fetching agents:", err));
+          
         fetch("/api/messages")
           .then(res => res.json())
-          .then(data => setMessages(data));
+          .then(data => setMessages(data))
+          .catch(err => console.error("Error fetching messages:", err));
 
         // Connect to WebSocket
-        const websocket = new WebSocket("ws://" + window.location.host + "/ws");
-        websocket.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          if (data.type === "agent_created") {
-            setAgents(prev => [...prev, data.agent]);
-          } else if (data.type === "message") {
-            setMessages(prev => [...prev, data.message]);
-          }
-        };
-        setWs(websocket);
-        return () => websocket.close();
+        try {
+          const websocket = new WebSocket("ws://" + window.location.host + "/ws");
+          websocket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === "agent_created") {
+              setAgents(prev => [...prev, data.agent]);
+            } else if (data.type === "message") {
+              setMessages(prev => [...prev, data.message]);
+            }
+          };
+          websocket.onerror = (error) => {
+            console.error("WebSocket error:", error);
+          };
+          setWs(websocket);
+          return () => websocket.close();
+        } catch (err) {
+          console.error("WebSocket connection error:", err);
+        }
       }, []);
 
       // Create a new agent
@@ -47,9 +59,11 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(newAgent),
-        }).then(() => {
+        })
+        .then(() => {
           setNewAgent({ name: "", behavior: { onMessage: "", action: "", value: "" } });
-        });
+        })
+        .catch(err => console.error("Error creating agent:", err));
       };
 
       // Send a message
@@ -58,7 +72,8 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sender_id: "user", receiver_id, content: { type: "ping" } }),
-        });
+        })
+        .catch(err => console.error("Error sending message:", err));
       };
 
       return (
@@ -134,7 +149,9 @@
       );
     }
 
-    ReactDOM.render(<App />, document.getElementById("root"));
+    // Use createRoot instead of render for React 18
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
   </script>
 </body>
 </html>
