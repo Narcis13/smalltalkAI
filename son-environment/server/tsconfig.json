@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    // Standard ECMAScript target
+    "target": "ESNext",
+    // Standard module system
+    "module": "ESNext",
+    // Resolve modules using Node.js algorithm
+    "moduleResolution": "node",
+    // Enable stricter type checking
+    "strict": true,
+    // Ensure case-correct imports
+    "forceConsistentCasingInFileNames": true,
+    // Skip type checking of declaration files
+    "skipLibCheck": true,
+    // Allow default imports from modules with no default export
+    "allowSyntheticDefaultImports": true,
+    // Enable experimental decorators (optional, but common)
+    "experimentalDecorators": true,
+    // Emit decorator metadata (optional, depends on libraries like TypeORM)
+    "emitDecoratorMetadata": true,
+    // Include Bun's built-in types
+    "types": ["bun-types"],
+    // Base URL for module resolution (optional)
+    // "baseUrl": ".",
+    // Path mapping (optional)
+    // "paths": {
+    //   "@/*": ["src/*"]
+    // },
+    "esModuleInterop": true,
+    // Ensure 'lib' includes DOM for things like fetch, URL, etc. if needed, though Bun provides them globally.
+    "lib": ["ESNext", "DOM"]
+  },
+  // Define which files TypeScript should include in compilation
+  "include": ["**/*.ts"],
+  // Define which files TypeScript should exclude
+  "exclude": ["node_modules", "dist", "build"]
+}
