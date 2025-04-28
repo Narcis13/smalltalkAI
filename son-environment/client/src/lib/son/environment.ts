@@ -3,8 +3,10 @@
  * This file implements the `SonEnvironment` class, which represents the execution
  * context (scope) for the SON interpreter. It handles variable storage, lookup
  * (with lexical scoping through parent environments), and assignment.
- * No changes were needed for Step 16, as the existing `set` method correctly
- * modifies the current scope as required by assignment semantics.
+ * It now includes flags/properties (`_isMethodContext`, `_methodSelf`) to identify
+ * method contexts, which is crucial for handling return semantics (`^`).
+ * It also implements `defineMethod` and `lookupMethodLocally` to manage methods
+ * defined directly within this environment (e.g., for class definitions).
  * </ai_info>
  *
  * @file client/src/lib/son/environment.ts
@@ -16,9 +18,12 @@
  * - `get` method searches current and parent scopes.
  * - `set` method modifies the current scope only.
  * - `createChild` method creates nested scopes.
+ * - Identifies method contexts via `isMethodContext` flag.
+ * - Stores method receiver (`self`) in `methodSelf` property for method contexts.
+ * - Stores and looks up locally defined methods via `defineMethod` and `lookupMethodLocally`.
  */
 
-import { ISonEnvironment, SonValue } from './types';
+import { ISonEnvironment, SonValue, SonMethodImplementation } from './types';
 import { VariableNotFoundError } from './errors';
 
 /**
@@ -27,14 +32,31 @@ import { VariableNotFoundError } from './errors';
 export class SonEnvironment implements ISonEnvironment {
     private variables: Map<string, SonValue>;
     private readonly parent: ISonEnvironment | null;
+    private readonly _isMethodContext: boolean;
+    private readonly _methodSelf: SonValue | undefined; // Store 'self' for method contexts
+
+    // Stores methods defined directly in this scope (e.g., class methods)
+    private methods: Map<string, SonMethodImplementation>;
 
     /**
      * Creates a new SonEnvironment instance.
      * @param parent - The parent environment for lexical scoping, or null for the root environment.
+     * @param options - Optional configuration for the environment.
+     * @param options.isMethodContext - Mark this environment as representing a method's execution context.
+     * @param options.methodSelf - Reference to the 'self' object within a method context.
      */
-    constructor(parent: ISonEnvironment | null = null) {
+    constructor(parent: ISonEnvironment | null = null, options?: { isMethodContext?: boolean; methodSelf?: SonValue }) {
         this.variables = new Map<string, SonValue>();
         this.parent = parent;
+        this._isMethodContext = options?.isMethodContext ?? false;
+        this._methodSelf = options?.methodSelf;
+        this.methods = new Map<string, SonMethodImplementation>(); // Initialize methods map
+
+        // Automatically define 'self' if this is a method context
+        if (this._isMethodContext && this._methodSelf !== undefined) {
+            this.variables.set('self', this._methodSelf);
+        }
+        // Define 'super' later if needed
     }
 
     /**
@@ -46,12 +68,11 @@ export class SonEnvironment implements ISonEnvironment {
      */
     get(name: string): SonValue {
         if (this.variables.has(name)) {
-            return this.variables.get(name);
+            return this.variables.get(name)!; // Use non-null assertion as `has` confirms existence
         }
 
         if (this.parent !== null) {
             // Delegate lookup to the parent environment
-            // No try-catch needed here; if parent throws VariableNotFoundError, let it propagate.
             return this.parent.get(name);
         }
 
@@ -67,17 +88,43 @@ export class SonEnvironment implements ISonEnvironment {
      */
     set(name: string, value: SonValue): void {
         // Smalltalk assignment semantics: assign in the current scope.
-        // If shadowing is needed, blocks/methods must create child environments.
         this.variables.set(name, value);
     }
 
     /**
      * Creates a new child environment that inherits from this environment.
      * The new environment's parent will be the current environment instance.
+     * @param options - Optional configuration for the child environment.
+     * @param options.isMethodContext - Mark this environment as representing a method's execution context.
+     * @param options.methodSelf - Reference to the 'self' object within a method context.
      * @returns A new SonEnvironment instance linked to the current one.
      */
-    createChild(): ISonEnvironment {
-        return new SonEnvironment(this);
+    createChild(options?: { isMethodContext?: boolean; methodSelf?: SonValue }): ISonEnvironment {
+        return new SonEnvironment(this, options);
+    }
+
+    /**
+     * Checks if this environment represents the top-level context of a method execution.
+     * @returns True if this is a method context, false otherwise.
+     */
+    isMethodContext(): boolean {
+        return this._isMethodContext;
+    }
+
+    /**
+     * Gets the receiver ('self') of the method if this is a method context.
+     * @returns The receiver ('self') object or undefined if not a method context.
+     */
+    getMethodSelf(): SonValue | undefined {
+        return this._methodSelf;
+    }
+
+     /**
+     * Gets the parent environment.
+     * @returns The parent ISonEnvironment or null.
+     */
+    getParent(): ISonEnvironment | null {
+        return this.parent;
     }
 
     /**
@@ -96,15 +143,25 @@ export class SonEnvironment implements ISonEnvironment {
      * @returns A string listing variables in scope.
      */
     dumpScope(depth: number = 0): string {
-        let str = '{ ';
+        let str = `{ (MethodCtx: ${this._isMethodContext}) vars: { `;
         this.variables.forEach((value, key) => {
              try {
-                 str += `${key}: ${JSON.stringify(value)}, `;
+                 // Basic string representation for blocks
+                 if (value && typeof value === 'object' && (value as any).__type === 'SonBlock') {
+                     str += `${key}: [BlockClosure], `;
+                 } else {
+                    // Limit length of stringified value for readability
+                     const valStr = JSON.stringify(value);
+                     str += `${key}: ${valStr.length > 50 ? valStr.substring(0, 47) + '...' : valStr}, `;
+                 }
              } catch (e) {
                  str += `${key}: [Unserializable], `; // Handle non-JSON values
              }
         });
-        str = str.length > 2 ? str.slice(0, -2) + ' }' : '{ }';
+        str = str.endsWith(', ') ? str.slice(0, -2) : str;
+        str += ' }, methods: [';
+        str += Array.from(this.methods.keys()).join(', ');
+        str += '] }';
 
         if (depth > 0 && this.parent instanceof SonEnvironment) {
              str += `\n  parent: ${this.parent.dumpScope(depth - 1)}`;
@@ -115,40 +172,49 @@ export class SonEnvironment implements ISonEnvironment {
     }
 
 
-    // --- Method Handling (Future Implementation) ---
-    // Storing methods directly in the environment might be one approach,
-    // especially for global functions or methods defined on the environment itself.
-    // Methods for specific objects/classes would typically be stored elsewhere
-    // (e.g., in a class structure looked up via the object's class pointer).
-
-    // Example placeholder structure (adapt as needed):
-    private methods: Map<string, { args: string[], body: SonValue }> = new Map();
+    // --- Method Handling ---
 
     /**
-     * Defines a method directly within this environment's scope.
-     * Note: This might be used for global functions or methods on the environment object itself.
-     * Methods on specific SON classes/objects will likely be handled differently.
+     * Defines a method directly within this environment's scope (e.g., in a class definition).
      * @param selector - The method selector string.
-     * @param args - An array of argument names.
+     * @param argNames - An array of argument names.
      * @param body - The SON code representing the method body.
      */
-    defineMethod(selector: string, args: string[], body: SonValue): void {
-        console.log(`Environment: Defining method #${selector} with args ${JSON.stringify(args)}`);
-        this.methods.set(selector, { args, body });
-        // Maybe store the method implementation directly on 'this.variables' too?
-        // e.g., this.set(selector, someFunctionWrapper); // Needs careful design.
+    defineMethod(selector: string, argNames: string[], body: SonValue): void {
+        console.log(`Environment: Defining method #${selector} with args ${JSON.stringify(argNames)} in scope ${this._isMethodContext ? 'Method' : 'Object/Class'}`);
+        const implementation: SonMethodImplementation = {
+             __type: 'SonMethodImplementation',
+             argNames,
+             body,
+             selector // Store selector for debugging
+        };
+        this.methods.set(selector, implementation);
     }
 
     /**
-     * Looks up a method implementation within this environment.
-     * This is a simplified lookup, primarily for methods defined directly on the environment.
-     * Real method lookup involves class hierarchy traversal.
+     * Looks up a method implementation within this environment or its parent chain (for class hierarchy).
+     * Placeholder for actual class-based lookup. Currently only checks local methods map.
+     * TODO: Implement real class hierarchy lookup (super lookup) when classes/inheritance are fully defined.
+     *
+     * @param receiver - The object receiving the message (needed to determine class).
      * @param selector - The method selector.
-     * @returns The method definition ({args, body}) or null if not found locally.
+     * @returns The method implementation details or null if not found.
      */
-    lookupMethodLocally(selector: string): { args: string[], body: SonValue } | null {
-         return this.methods.get(selector) || null;
+    lookupMethod(receiver: SonValue, selector: string): SonMethodImplementation | null {
+        // For now, assume lookup happens on the class object itself.
+        // This method on the environment isn't the primary lookup path currently.
+        // The interpreter calls getClassOf(receiver) then lookupMethodLocally on the class.
+        // This might be used later for 'super' sends.
+        return this.lookupMethodLocally(selector);
     }
 
-    // `lookupMethod(receiver, selector)` would be more complex, involving `receiver`'s class.
+    /**
+     * Looks up a method definition directly within this environment's own scope (e.g., on a class).
+     * Does not search parent environments.
+     * @param selector - The method selector string.
+     * @returns The method implementation details or null if not found locally.
+     */
+    lookupMethodLocally(selector: string): SonMethodImplementation | null {
+         return this.methods.get(selector) || null;
+    }
 }

@@ -1,113 +1,278 @@
 /**
- * @file server/db.ts
- * @description Handles SQLite database connection and schema initialization.
+ * <ai_info>
+ * This file handles SQLite database initialization, schema creation, and seeding
+ * for the SON Environment backend. It uses `bun:sqlite` for database operations.
+ * It now includes a `seedDatabase` function to populate the `son_base_environment`
+ * table with core definitions for Object, Number, String, Boolean, BlockClosure, Symbol,
+ * Transcript, and the JSBridge. The `initializeDatabase` function ensures tables
+ * are created and seeding occurs only if the base environment table is initially empty.
+ * </ai_info>
  *
- * This module connects to the SQLite database file specified, ensures the necessary
- * directory exists, creates the database file if it doesn't exist, and sets up
- * the required table schema (`son_classes`, `son_methods`, `son_base_environment`).
- * It exports the initialized database instance for use throughout the server application.
+ * @file server/db.ts
+ * @description SQLite database initialization, schema setup, and seeding.
+ *
+ * Key features:
+ * - Initializes a connection to the SQLite database (`son_environment.sqlite`).
+ * - Defines and creates the necessary tables (`son_classes`, `son_methods`, `son_base_environment`).
+ * - Includes a `seedDatabase` function to populate `son_base_environment` with essential definitions.
+ * - Ensures seeding only happens once on an empty database.
+ * - Exports the initialized database instance.
  *
  * @dependencies
- * - bun:sqlite: For interacting with the SQLite database.
- * - node:fs: For file system operations (checking/creating directories).
- * - node:path: For handling file paths consistently.
+ * - bun:sqlite: Built-in Bun module for SQLite interaction.
+ * - node:crypto: For generating UUIDs (though Bun's `crypto.randomUUID()` is preferred).
+ * - node:fs: For checking if DB file exists (optional).
  *
  * @notes
- * - The database schema is defined according to the technical specification.
- * - `CREATE TABLE IF NOT EXISTS` is used to make schema initialization idempotent.
- * - The database instance is exported directly after initialization.
+ * - Database file is stored in `server/data/son_environment.sqlite`.
+ * - Error handling for database operations should be added in query functions.
+ * - Seeding data provides the fundamental building blocks for the SON runtime.
  */
-
 import { Database } from "bun:sqlite";
-import fs from "node:fs";
-import path from "node:path";
+import { join } from 'node:path';
+import { mkdirSync, existsSync } from 'node:fs';
 
-// Define the path to the database file
-const dbDir = path.join(import.meta.dir, "data");
-const dbPath = path.join(dbDir, "son_environment.sqlite");
+// Define the path to the data directory and the database file
+const dataDir = join(import.meta.dir, 'data');
+const dbPath = join(dataDir, "son_environment.sqlite");
 
 // Ensure the data directory exists
-if (!fs.existsSync(dbDir)) {
-	console.log(`Creating database directory at: ${dbDir}`);
-	fs.mkdirSync(dbDir, { recursive: true });
+try {
+    if (!existsSync(dataDir)) {
+        mkdirSync(dataDir, { recursive: true });
+        console.log(`Created data directory: ${dataDir}`);
+    }
+} catch (err) {
+    console.error("Failed to create data directory:", err);
+    // Decide if process should exit or continue without db
+    process.exit(1); // Exit if we can't ensure data directory
 }
 
-console.log(`Initializing database at: ${dbPath}`);
+
+console.log(`Database path: ${dbPath}`);
 
 // Initialize the database connection
-// The { create: true } option automatically creates the file if it doesn't exist.
-export const db = new Database(dbPath, { create: true });
+let db: Database;
+try {
+     db = new Database(dbPath, { create: true }); // Creates the file if it doesn't exist
+     console.log("Database connection opened successfully.");
+} catch (err) {
+     console.error("Failed to open database connection:", err);
+     process.exit(1); // Exit if DB cannot be opened
+}
+
 
 /**
- * Initializes the database schema by creating tables if they don't already exist.
- * This function is executed immediately when the module is loaded.
+ * Creates the necessary database tables if they don't already exist.
  */
-const initializeDatabase = () => {
-	console.log("Running database schema initialization...");
+const createTables = () => {
+    console.log("Creating database tables if they don't exist...");
+    try {
+        db.run(`
+            CREATE TABLE IF NOT EXISTS son_classes (
+                id TEXT PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_son_classes_name ON son_classes(name);`);
 
-	// Transaction for atomic schema creation
-	db.transaction(() => {
-		// Create son_classes table
-		// Stores the names of SON "classes" (objects acting as classes).
-		db.run(`
-      CREATE TABLE IF NOT EXISTS son_classes (
-        id TEXT PRIMARY KEY,           -- UUID generated by the server
-        name TEXT UNIQUE NOT NULL,     -- The unique name of the class used in SON
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP -- Timestamp of creation
-      );
-    `);
-		console.log("Checked/Created son_classes table.");
+        db.run(`
+            CREATE TABLE IF NOT EXISTS son_methods (
+                id TEXT PRIMARY KEY,
+                class_id TEXT NOT NULL REFERENCES son_classes(id) ON DELETE CASCADE,
+                selector TEXT NOT NULL,
+                arguments_json TEXT NOT NULL,
+                body_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(class_id, selector)
+            );
+        `);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_son_methods_class_id ON son_methods(class_id);`);
 
-		// Create index on son_classes name for faster lookups
-		db.run(`
-      CREATE INDEX IF NOT EXISTS idx_son_classes_name ON son_classes (name);
-    `);
-		console.log("Checked/Created index idx_son_classes_name.");
-
-		// Create son_methods table
-		// Stores method definitions associated with classes.
-		db.run(`
-      CREATE TABLE IF NOT EXISTS son_methods (
-        id TEXT PRIMARY KEY,              -- UUID generated by the server
-        class_id TEXT NOT NULL,           -- Foreign key referencing son_classes.id
-        selector TEXT NOT NULL,           -- The method selector (e.g., "value:", "at:put:")
-        arguments_json TEXT NOT NULL,     -- JSON string representation of the argument names array (e.g., '["a", "b"]')
-        body_json TEXT NOT NULL,          -- JSON string representation of the method body array (e.g., '[["^", ["$a", "+", "$b"]]]')
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP, -- Timestamp of creation
-        UNIQUE(class_id, selector),       -- Ensure a class has only one method with a given selector
-        FOREIGN KEY (class_id) REFERENCES son_classes(id) ON DELETE CASCADE -- Optional: Cascade deletes if a class is removed
-      );
-    `);
-		console.log("Checked/Created son_methods table.");
-
-		// Create index on son_methods class_id for faster lookups of methods for a class
-		db.run(`
-      CREATE INDEX IF NOT EXISTS idx_son_methods_class_id ON son_methods (class_id);
-    `);
-		console.log("Checked/Created index idx_son_methods_class_id.");
-
-		// Create son_base_environment table
-		// Stores core definitions (base classes, objects, methods) loaded on startup.
-		db.run(`
-      CREATE TABLE IF NOT EXISTS son_base_environment (
-        key TEXT PRIMARY KEY,             -- The top-level key for the base definition (e.g., "Number", "String", "Transcript")
-        value_json TEXT NOT NULL          -- JSON string representation of the SON object/class definition associated with the key
-      );
-    `);
-		console.log("Checked/Created son_base_environment table.");
-	})(); // Immediately invoke the transaction
-
-	console.log("Database schema initialization complete.");
+        db.run(`
+            CREATE TABLE IF NOT EXISTS son_base_environment (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL
+            );
+        `);
+        console.log("Table creation check complete.");
+    } catch (err) {
+        console.error("Failed to create database tables:", err);
+        throw err; // Re-throw to stop initialization if tables fail
+    }
 };
 
-// Run initialization logic when the module loads
+/**
+ * Seeds the `son_base_environment` table with essential definitions.
+ * This should only run if the table is empty.
+ */
+const seedDatabase = () => {
+    console.log("Checking if database seeding is required...");
+    try {
+        // Check if the base environment table is empty
+        const countResult = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM son_base_environment`).get();
+
+        if (countResult && countResult.count > 0) {
+            console.log("Database already seeded. Skipping.");
+            return;
+        }
+
+        console.log("Seeding son_base_environment table...");
+
+        // Define the base environment seed data
+        // Uses 'primitive:' marker for methods implemented by the interpreter primitive handler.
+        const baseEnvSeedData: Record<string, any> = {
+            // --- Core Classes (Structure based on mergeBaseEnvironment expectations) ---
+            "Object": {
+                "methods": {
+                    "==":           { "argNames": ["other"], "body": ["primitive:Equals:", "$self", "$other"]},
+                    "~=":           { "argNames": ["other"], "body": ["primitive:NotEquals:", "$self", "$other"]},
+                    "===":          { "argNames": ["other"], "body": ["primitive:IdentityEquals:", "$self", "$other"]},
+                    "~~=":          { "argNames": ["other"], "body": ["primitive:IdentityNotEquals:", "$self", "$other"]},
+                    "class":        { "argNames": [],        "body": ["primitive:Class:", "$self"] },
+                    "printString":  { "argNames": [],        "body": `"an Object"` }, // Basic fallback
+                    // Add basic error handling, subclass responsibility etc. later
+                }
+            },
+            "Number": {
+                 // Inheritance not explicitly modeled here, but assumes Object methods are available via lookup fallback
+                "methods": {
+                    "+":  { "argNames": ["aNumber"], "body": ["primitive:NumberAdd:", "$self", "$aNumber"] },
+                    "-":  { "argNames": ["aNumber"], "body": ["primitive:NumberSubtract:", "$self", "$aNumber"] },
+                    "*":  { "argNames": ["aNumber"], "body": ["primitive:NumberMultiply:", "$self", "$aNumber"] },
+                    "/":  { "argNames": ["aNumber"], "body": ["primitive:NumberDivide:", "$self", "$aNumber"] },
+                    "<":  { "argNames": ["aNumber"], "body": ["primitive:NumberLessThan:", "$self", "$aNumber"] },
+                    ">":  { "argNames": ["aNumber"], "body": ["primitive:NumberGreaterThan:", "$self", "$aNumber"] },
+                    "<=": { "argNames": ["aNumber"], "body": ["primitive:NumberLessOrEqual:", "$self", "$aNumber"] },
+                    ">=": { "argNames": ["aNumber"], "body": ["primitive:NumberGreaterOrEqual:", "$self", "$aNumber"] },
+                    "==": { "argNames": ["aNumber"], "body": ["primitive:NumberEquals:", "$self", "$aNumber"] }, // Specific number equality
+                    "printString": { "argNames": [], "body": ["primitive:NumberToString:", "$self"] } // Needs primitive
+                }
+            },
+            "String": {
+                 "methods": {
+                    ",": { "argNames": ["aString"], "body": ["primitive:StringConcatenate:", "$self", "$aString"] }, // Needs primitive
+                    "printString": { "argNames": [], "body": "$self" } // Strings print as themselves
+                     // Add length, comparison, etc. later
+                 }
+            },
+            "Boolean": {
+                 "methods": {
+                    "&":        { "argNames": ["aBoolean"], "body": ["primitive:BooleanAnd:", "$self", "$aBoolean"] },
+                    "|":        { "argNames": ["aBoolean"], "body": ["primitive:BooleanOr:", "$self", "$aBoolean"] },
+                    "not":      { "argNames": [],           "body": ["primitive:BooleanNot", "$self"] },
+                    "ifTrue:":  { "argNames": ["trueBlock"], "body": ["primitive:BooleanIfTrue:", "$self", "$trueBlock"] },
+                    "ifFalse:": { "argNames": ["falseBlock"],"body": ["primitive:BooleanIfFalse:", "$self", "$falseBlock"] },
+                    "ifTrue:ifFalse:": { "argNames": ["trueBlock", "falseBlock"], "body": ["primitive:BooleanIfTrueIfFalse:", "$self", "$trueBlock", "$falseBlock"] },
+                     "printString": { "argNames": [], "body": ["primitive:BooleanToString:", "$self"] } // Needs primitive
+                 }
+            },
+             "BlockClosure": {
+                 "methods": {
+                     // value, value:, value:value: etc. are handled directly by sendMessage based on type check
+                     // We could define methods like whileTrue:, whileFalse: here
+                     "whileTrue:": {
+                         "argNames": ["bodyBlock"],
+                         "body": [
+                             // Loop structure:
+                             // L1: [conditionBlock value] ifFalse: [^ self]. "Evaluate condition, exit loop if false"
+                             //     [bodyBlock value].                  "Execute body"
+                             //     -> L1                               "Loop back (implicit)" - This needs loop construct or recursion.
+
+                             // Recursive approach (potential stack overflow for long loops):
+                             // Define recursive helper? Or implement loop primitive?
+                             // For now, leave unimplemented or use JSBridge setTimeout for pseudo-loop.
+                              ["$Transcript", "show:", "'whileTrue:' not fully implemented in base env."],
+                              {"#": "NotImplemented"} // Placeholder return
+                         ]
+                     },
+                     "printString": { "argNames": [], "body": `"a BlockClosure"` }
+                 }
+             },
+            "Symbol": {
+                 "methods": {
+                     "printString": { "argNames": [], "body": ["primitive:SymbolToString:", "$self"] } // Needs primitive
+                 }
+             },
+            "UndefinedObject": { // Class for 'null'
+                "methods": {
+                    "ifNil:": { "argNames": ["nilBlock"], "body": ["$nilBlock", "value"] }, // Execute block if receiver is nil
+                    "ifNotNil:": { "argNames": ["notNilBlock"], "body": "null" }, // Do nothing if receiver is nil
+                    "ifNil:ifNotNil:": { "argNames": ["nilBlock", "notNilBlock"], "body": ["$nilBlock", "value"] },
+                     "printString": { "argNames": [], "body": `"nil"` }
+                 }
+            },
+
+            // --- Core Objects (non-class structures) ---
+            "Transcript": {
+                // The actual implementation is injected dynamically by Workspace to interact with React state.
+                // This definition just signals its existence and expected methods.
+                "methods": {
+                    "show:": { "argNames": ["anObject"], "body": [] }, // Body is ignored by dynamic injection
+                    "cr":    { "argNames": [],           "body": [] }
+                }
+            },
+            "JSBridge": {
+                // Special marker for the context provider to identify and instantiate
+                "__isJSBridge": true,
+                // Methods are placeholders; actual implementation is JS functions attached in context provider.
+                "methods": {
+                    "log:": { "argNames": ["anObject"], "body": null },
+                    "setTimeout:delay:": { "argNames": ["aBlock", "delayMs"], "body": null },
+                    "fetch:options:": { "argNames": ["url", "options"], "body": null }
+                }
+            }
+        };
+
+        // Prepare statement for insertion
+        const insertStmt = db.prepare(`INSERT INTO son_base_environment (key, value_json) VALUES (?, ?)`);
+
+        // Insert data within a transaction
+        const insertMany = db.transaction((data) => {
+            for (const key in data) {
+                try {
+                    const valueJson = JSON.stringify(data[key]);
+                    insertStmt.run(key, valueJson);
+                    console.log(` -> Seeded base environment key: ${key}`);
+                } catch (err) {
+                     console.error(`Failed to stringify or insert base env key '${key}':`, err);
+                     // Decide whether to continue or abort transaction
+                     throw new Error(`Seeding failed for key ${key}`);
+                }
+            }
+        });
+
+        insertMany(baseEnvSeedData);
+        console.log("Database seeding complete.");
+
+    } catch (err) {
+        console.error("Failed during database seeding check or process:", err);
+        throw err; // Propagate error
+    }
+};
+
+/**
+ * Initializes the database by creating tables and seeding if necessary.
+ */
+const initializeDatabase = () => {
+    console.log("Initializing database...");
+    try {
+        db.exec("PRAGMA journal_mode = WAL;"); // Improve concurrency
+        db.exec("PRAGMA foreign_keys = ON;"); // Ensure foreign key constraints are enforced
+        createTables();
+        seedDatabase();
+        console.log("Database initialization complete.");
+    } catch (err) {
+        console.error("Database initialization failed:", err);
+        // Close the DB connection if initialization fails?
+        db.close();
+        process.exit(1); // Exit if critical DB setup fails
+    }
+};
+
+// Initialize the database on module load
 initializeDatabase();
 
-// Optional: Add a check to confirm connection
-try {
-	const query = db.query("SELECT count(*) as count FROM sqlite_master");
-	const result = query.get();
-	console.log(`Database connection successful. Found ${result?.count} tables/indexes.`);
-} catch (error) {
-	console.error("Database connection check failed:", error);
-}
+
+export { db };

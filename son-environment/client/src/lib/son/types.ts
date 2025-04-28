@@ -2,7 +2,8 @@
  * <ai_info>
  * This file defines the core TypeScript types used throughout the SON (Smalltalk Object Notation)
  * interpreter and environment. It establishes the structure for SON values, objects, symbols,
- * arrays, and the execution environment.
+ * arrays, block closures, and the execution environment. It now includes a formal definition
+ * for `lookupMethodLocally` in the environment interface.
  * </ai_info>
  *
  * @file client/src/lib/son/types.ts
@@ -28,17 +29,18 @@ export type SonArray = SonValue[];
 export type SonObject = { [key: string]: SonValue } | SonSymbol;
 
 /**
- * Represents any valid value within the SON environment.
- * This includes primitive types, symbols, objects, and arrays.
+ * Interface for Method implementations (represents the data needed to execute a method).
  */
-export type SonValue =
-    | number
-    | string
-    | boolean
-    | null
-    | SonSymbol // e.g., { '#': 'mySymbol' }
-    | SonObject // e.g., { 'key': 'value' } or potentially SON objects later
-    | SonArray; // e.g., [1, '+', 2] or ['stmt1', 'stmt2']
+export interface SonMethodImplementation {
+    __type: 'SonMethodImplementation';
+    /** The names of the arguments the method expects. */
+    argNames: string[];
+    /** The SON code (typically an array of statements) representing the method body. */
+    body: SonValue; // Usually SonArray
+    /** The selector this implementation corresponds to (useful for debugging). */
+    selector?: string; // Optional: Add selector info if helpful
+}
+
 
 /**
  * Represents the execution environment or scope in which SON code is evaluated.
@@ -64,30 +66,67 @@ export interface ISonEnvironment {
     /**
      * Creates a new child environment that inherits from this environment.
      * Used for creating new lexical scopes (e.g., for block or method execution).
+     * @param options - Optional configuration for the child environment.
+     * @param options.isMethodContext - Mark this environment as representing a method's execution context.
+     * @param options.methodSelf - Reference to the 'self' object within a method context.
      * @returns A new SonEnvironment instance whose parent is the current environment.
      */
-    createChild(): ISonEnvironment;
+    createChild(options?: { isMethodContext?: boolean; methodSelf?: SonValue }): ISonEnvironment;
 
-    // TODO: Add methods for method definition and lookup as interpreter evolves
-    // defineMethod(selector: string, args: string[], body: SonValue): void;
-    // lookupMethod(receiver: SonValue, selector: string): SonValue; // Returns method implementation
+    /** Checks if this environment represents the top-level context of a method execution. */
+    isMethodContext(): boolean;
+
+    /** Gets the receiver ('self') of the method if this is a method context. */
+    getMethodSelf(): SonValue | undefined;
+
+    /** Gets the parent environment. */
+    getParent(): ISonEnvironment | null;
+
+    /** Defines a method within this environment's scope (e.g., for a class definition). */
+    defineMethod(selector: string, argNames: string[], body: SonValue): void;
+
+    /**
+     * Looks up a method implementation based on the selector for a given receiver type/class.
+     * This might involve searching the class hierarchy in the future.
+     * @param receiver - The object receiving the message (used to determine class).
+     * @param selector - The method selector string.
+     * @returns The method implementation details or null if not found in the hierarchy.
+     */
+    lookupMethod(receiver: SonValue, selector: string): SonMethodImplementation | null;
+
+    /**
+     * Looks up a method definition directly within this environment's own scope.
+     * Does not search parent environments (used for checking methods defined directly on an object/class).
+     * @param selector - The method selector string.
+     * @returns The method implementation details or null if not found locally.
+     */
+    lookupMethodLocally(selector: string): SonMethodImplementation | null;
 }
 
-// Interface for Block closures (to be defined later)
-// export interface SonBlock {
-//     type: 'block';
-//     args: string[];
-//     body: SonValue;
-//     capturedEnv: ISonEnvironment;
-//     // Method to evaluate the block
-//     evaluate(...args: SonValue[]): SonValue;
-// }
 
-// Interface for Method implementations (to be defined later)
-// export interface SonMethod {
-//     type: 'method';
-//     args: string[];
-//     body: SonValue;
-//     // Method to execute the method in a given context
-//     execute(receiver: SonValue, args: SonValue[], env: ISonEnvironment): SonValue;
-// }
+/**
+ * Represents a block closure in SON.
+ */
+export interface SonBlock {
+    /** Distinguisher for type guards */
+    __type: 'SonBlock';
+    /** The names of the block arguments. */
+    argNames: string[];
+    /** The SON code array representing the block's body. */
+    body: SonArray;
+    /** The lexical environment captured when the block was defined. */
+    lexicalScope: ISonEnvironment;
+    /** The environment of the method context in which the block was defined. Needed for non-local returns. */
+    homeContext: ISonEnvironment;
+}
+
+// Forward declaration to avoid circular dependency issues if types become complex
+export type SonValue =
+    | number
+    | string
+    | boolean
+    | null
+    | SonSymbol // e.g., { '#': 'mySymbol' }
+    | SonObject // e.g., { 'key': 'value' } or potentially SON objects later
+    | SonArray // e.g., [1, '+', 2] or ['stmt1', 'stmt2']
+    | SonBlock; // Block closure object
