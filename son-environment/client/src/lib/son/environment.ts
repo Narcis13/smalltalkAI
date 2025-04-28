@@ -3,6 +3,8 @@
  * This file implements the `SonEnvironment` class, which represents the execution
  * context (scope) for the SON interpreter. It handles variable storage, lookup
  * (with lexical scoping through parent environments), and assignment.
+ * No changes were needed for Step 16, as the existing `set` method correctly
+ * modifies the current scope as required by assignment semantics.
  * </ai_info>
  *
  * @file client/src/lib/son/environment.ts
@@ -49,17 +51,8 @@ export class SonEnvironment implements ISonEnvironment {
 
         if (this.parent !== null) {
             // Delegate lookup to the parent environment
-            try {
-                return this.parent.get(name);
-            } catch (e) {
-                if (e instanceof VariableNotFoundError) {
-                    // If parent chain didn't find it, re-throw the specific error
-                     throw e;
-                } else {
-                     // Rethrow unexpected errors
-                     throw e;
-                }
-            }
+            // No try-catch needed here; if parent throws VariableNotFoundError, let it propagate.
+            return this.parent.get(name);
         }
 
         // Reached the root environment and still not found
@@ -73,6 +66,8 @@ export class SonEnvironment implements ISonEnvironment {
      * @param value - The value to assign to the variable.
      */
     set(name: string, value: SonValue): void {
+        // Smalltalk assignment semantics: assign in the current scope.
+        // If shadowing is needed, blocks/methods must create child environments.
         this.variables.set(name, value);
     }
 
@@ -95,22 +90,65 @@ export class SonEnvironment implements ISonEnvironment {
     }
 
     /**
-     * Utility method for debugging: Gets a string representation of the local variables.
-     * @returns A string listing local variables.
+     * Utility method for debugging: Gets a string representation of the local variables
+     * and optionally parent variables recursively.
+     * @param depth - How many parent levels to dump (0 for local only).
+     * @returns A string listing variables in scope.
      */
-    dumpLocals(): string {
+    dumpScope(depth: number = 0): string {
         let str = '{ ';
         this.variables.forEach((value, key) => {
-            str += `${key}: ${JSON.stringify(value)}, `;
+             try {
+                 str += `${key}: ${JSON.stringify(value)}, `;
+             } catch (e) {
+                 str += `${key}: [Unserializable], `; // Handle non-JSON values
+             }
         });
-         return str.length > 2 ? str.slice(0, -2) + ' }' : '{ }';
+        str = str.length > 2 ? str.slice(0, -2) + ' }' : '{ }';
+
+        if (depth > 0 && this.parent instanceof SonEnvironment) {
+             str += `\n  parent: ${this.parent.dumpScope(depth - 1)}`;
+        } else if (this.parent) {
+             str += `\n  parent: [Non-SonEnvironment Parent]`;
+        }
+        return str;
     }
 
-    // TODO: Implement method definition/lookup later
-    // defineMethod(selector: string, args: string[], body: SonValue): void {
-    //   // ... logic to store method definition ...
-    // }
-    // lookupMethod(receiver: SonValue, selector: string): SonValue {
-    //   // ... logic to find method implementation ...
-    // }
+
+    // --- Method Handling (Future Implementation) ---
+    // Storing methods directly in the environment might be one approach,
+    // especially for global functions or methods defined on the environment itself.
+    // Methods for specific objects/classes would typically be stored elsewhere
+    // (e.g., in a class structure looked up via the object's class pointer).
+
+    // Example placeholder structure (adapt as needed):
+    private methods: Map<string, { args: string[], body: SonValue }> = new Map();
+
+    /**
+     * Defines a method directly within this environment's scope.
+     * Note: This might be used for global functions or methods on the environment object itself.
+     * Methods on specific SON classes/objects will likely be handled differently.
+     * @param selector - The method selector string.
+     * @param args - An array of argument names.
+     * @param body - The SON code representing the method body.
+     */
+    defineMethod(selector: string, args: string[], body: SonValue): void {
+        console.log(`Environment: Defining method #${selector} with args ${JSON.stringify(args)}`);
+        this.methods.set(selector, { args, body });
+        // Maybe store the method implementation directly on 'this.variables' too?
+        // e.g., this.set(selector, someFunctionWrapper); // Needs careful design.
+    }
+
+    /**
+     * Looks up a method implementation within this environment.
+     * This is a simplified lookup, primarily for methods defined directly on the environment.
+     * Real method lookup involves class hierarchy traversal.
+     * @param selector - The method selector.
+     * @returns The method definition ({args, body}) or null if not found locally.
+     */
+    lookupMethodLocally(selector: string): { args: string[], body: SonValue } | null {
+         return this.methods.get(selector) || null;
+    }
+
+    // `lookupMethod(receiver, selector)` would be more complex, involving `receiver`'s class.
 }

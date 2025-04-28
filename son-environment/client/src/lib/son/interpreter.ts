@@ -3,8 +3,8 @@
  * This file contains the core evaluation logic for SON (Smalltalk Object Notation) JSON.
  * The `evaluate` function recursively traverses the SON Abstract Syntax Tree (AST) represented
  * as JSON, interpreting the different language constructs according to the specification.
- * It relies on the `SonEnvironment` for variable scoping and will later handle message sending,
- * block closures, and other features.
+ * It relies on the `SonEnvironment` for variable scoping and handles message sending,
+ * assignments, cascades, and sequences. Block closures and returns will be added later.
  * </ai_info>
  *
  * @file client/src/lib/son/interpreter.ts
@@ -16,12 +16,14 @@
  * - Handles symbols (`{ "#": "name" }`).
  * - Handles variable lookup (`$varName`) via the environment.
  * - Handles sequences of statements (evaluates all, returns last).
- * - Handles basic unary and binary message sends (currently assumes JS methods on receiver).
- * - Basic error handling for variable not found and message not understood.
+ * - Handles assignment (`["var:", expr]`).
+ * - Handles unary, binary, and keyword message sends.
+ * - Handles cascades (`["receiver", "cascade:", [msgs]]`).
+ * - Basic error handling (VariableNotFound, MessageNotUnderstood, ArgumentError).
  */
 
 import { ISonEnvironment, SonValue, SonSymbol, SonArray, SonObject } from './types';
-import { VariableNotFoundError, MessageNotUnderstoodError, ArgumentError } from './errors';
+import { VariableNotFoundError, MessageNotUnderstoodError, ArgumentError, SonError } from './errors'; // Added SonError
 
 // --- Helper Functions ---
 
@@ -47,7 +49,7 @@ function isSonSymbol(value: any): value is SonSymbol {
  * @param env The current execution environment (potentially needed for context).
  * @returns The result of the message send.
  * @throws {MessageNotUnderstoodError} If the receiver doesn't have a suitable method.
- * @throws {ArgumentError} If the method exists but expects a different number of arguments.
+ * @throws {ArgumentError} If the method exists but expects a different number of arguments (basic check).
  * @throws Any error thrown by the executed method.
  */
 function lookupAndSend(receiver: any, selector: string, args: SonValue[], env: ISonEnvironment): SonValue {
@@ -56,25 +58,38 @@ function lookupAndSend(receiver: any, selector: string, args: SonValue[], env: I
 
     // Handle null/undefined receivers gracefully
     if (receiver === null || receiver === undefined) {
+        // In Smalltalk, sending messages to nil often results in nil or an error.
+        // Let's throw MessageNotUnderstood for consistency for now.
         throw new MessageNotUnderstoodError(receiver, selector);
     }
 
     // Basic JS property lookup
+    // For keyword messages like "at:put:", this looks for a JS property named "at:put:"
     const method = (receiver as any)[selector];
 
     if (typeof method === 'function') {
-        // Check arity (basic check, may not be reliable for all JS functions)
-        // Keyword messages will need different handling here later.
-        if (method.length !== args.length) {
-            // Allow calling functions with 0 args even if method.length > 0 (e.g. native methods) - refine later?
-             if (args.length !== 0 || method.length !== 0) {
-                // Simple check: length mismatch, likely an error for basic unary/binary
-                // Keyword sends will need specific checks based on selector parts
-                console.warn(`Possible arity mismatch for selector #${selector}: method expects ${method.length}, got ${args.length} args.`);
-                // Consider throwing ArgumentError for stricter checking, especially outside unary/binary
-                // throw new ArgumentError(`Selector #${selector} expects ${method.length} arguments, but received ${args.length}.`);
-             }
+        // Basic arity check for non-keyword messages might be useful
+        // but unreliable for JS. Keyword checks are more robust based on selector parts.
+        const selectorParts = selector.split(':').filter(part => part.length > 0);
+        const expectedArgs = selectorParts.length;
+
+        // Only perform arity check if it looks like a keyword message
+        // or a simple unary/binary where we expect a specific number of args
+        const isKeyword = selector.includes(':') && selector.endsWith(':');
+        const isUnary = !selector.includes(':') && args.length === 0;
+        const isBinary = !selector.includes(':') && args.length === 1; // Basic binary check
+
+        if (isKeyword && expectedArgs !== args.length) {
+             console.warn(`Arity mismatch for keyword selector #${selector}: expected ${expectedArgs}, got ${args.length} args.`);
+             // Optionally throw:
+             throw new ArgumentError(`Selector #${selector} expects ${expectedArgs} arguments, but received ${args.length}.`);
         }
+        // Less strict check for unary/binary as JS function length is unreliable
+        // if ((isUnary || isBinary) && method.length !== args.length && method.length !== 0) {
+             // console.warn(`Possible arity mismatch for selector #${selector}: method expects ${method.length}, got ${args.length} args.`);
+        // }
+
+
         try {
             // Call the JS function, setting 'this' to the receiver
             return method.apply(receiver, args);
@@ -125,12 +140,13 @@ export function evaluate(node: SonValue, env: ISonEnvironment): SonValue {
             if (!varName) {
                 throw new Error("Invalid variable name: '$'");
             }
-             if (varName === 'env') return env; // Special case? Or disallow? Let's disallow direct $env access for now. TBD.
+             // Allow access to $env for introspection if needed? TBD. Let's allow it for now.
+             if (varName === 'env') return env;
+
             try {
                  return env.get(varName);
             } catch (e) {
                  if (e instanceof VariableNotFoundError) {
-                     // Attach node info? Maybe not needed if stack trace is good.
                      console.error(`Error evaluating variable "${node}": ${e.message}`);
                  }
                  throw e; // Re-throw
@@ -142,8 +158,7 @@ export function evaluate(node: SonValue, env: ISonEnvironment): SonValue {
 
     // Check for Symbol Literal (after string check)
     if (isSonSymbol(node)) {
-        // For now, return the symbol object itself.
-        // Later, might intern symbols or use JS Symbol() if needed for identity.
+        // Return the symbol object itself for now.
         return node;
     }
 
@@ -151,84 +166,149 @@ export function evaluate(node: SonValue, env: ISonEnvironment): SonValue {
     if (Array.isArray(node)) {
         const sonArray = node as SonArray;
         if (sonArray.length === 0) {
-            return null; // Empty sequence evaluates to null? Or error? Let's say null.
+            return null; // Empty sequence evaluates to null.
         }
 
-        // --- Check for Message Send Patterns ---
-        // TODO: Refine these checks to be more robust, especially differentiating from special forms
+        const first = sonArray[0];
+        const second = sonArray[1];
 
-        // Unary Send: [receiver, selector] (selector must be string)
-        if (sonArray.length === 2 && typeof sonArray[1] === 'string') {
-            const receiverNode = sonArray[0];
-            const selector = sonArray[1] as string;
-            // Avoid interpreting special forms like assignment as unary sends yet
-            if (!selector.endsWith(':')) { // Simple heuristic, assignments end with ':'
-                 console.debug(`Unary Send: ${JSON.stringify(receiverNode)} >> ${selector}`);
-                const receiver = evaluate(receiverNode, env);
-                 // Currently uses basic JS property lookup
-                return lookupAndSend(receiver, selector, [], env);
+        // --- Special Forms and Constructs ---
+
+        // Assignment: ["var:", expr]
+        if (sonArray.length === 2 && typeof first === 'string' && first.endsWith(':') && first.length > 1) {
+            // Exclude specific keywords that use colon notation but aren't assignments
+            if (first !== 'cascade:' && first !== '=>:') { // Add other special forms here if needed
+                const varName = first.slice(0, -1); // Remove trailing ':'
+                console.debug(`Assignment: ${varName} := ${JSON.stringify(sonArray[1])}`);
+                const value = evaluate(sonArray[1], env);
+                env.set(varName, value);
+                return value; // Assignment returns the assigned value
             }
         }
 
-        // Binary Send: [receiver, operator, argument] (operator must be string)
-        if (sonArray.length === 3 && typeof sonArray[1] === 'string') {
-             // Avoid interpreting keyword sends or special forms like define:args:body: yet
-             const potentialOperator = sonArray[1] as string;
-             // Basic check: common binary operators don't contain ':'
-             // and aren't keywords like 'cascade:' or '=>:'
-             const isLikelyBinary = !potentialOperator.includes(':') && potentialOperator !== '=>:' && potentialOperator !== 'cascade:';
+        // Cascade: ["receiver", "cascade:", [msg1, msg2, ...]]
+        if (sonArray.length === 3 && second === 'cascade:' && Array.isArray(sonArray[2])) {
+            const receiverNode = first;
+            const messages = sonArray[2] as SonArray[];
+            console.debug(`Cascade: ${JSON.stringify(receiverNode)} cascade: ${JSON.stringify(messages)}`);
 
-             if(isLikelyBinary) {
-                const receiverNode = sonArray[0];
-                const operator = potentialOperator;
-                const argumentNode = sonArray[2];
-                console.debug(`Binary Send: ${JSON.stringify(receiverNode)} ${operator} ${JSON.stringify(argumentNode)}`);
-                const receiver = evaluate(receiverNode, env);
-                const argument = evaluate(argumentNode, env);
-                 // Currently uses basic JS property lookup
-                return lookupAndSend(receiver, operator, [argument], env);
-             }
+            const receiver = evaluate(receiverNode, env);
+            if (messages.length === 0) {
+                return receiver; // Empty cascade returns receiver
+            }
+
+            for (const msg of messages) {
+                if (!Array.isArray(msg) || msg.length === 0) {
+                    throw new ArgumentError("Invalid message format within cascade.");
+                }
+                // Construct the full message send array [receiver, selector, ...args]
+                const messageToSend: SonArray = [receiver, ...msg]; // Prepend receiver (already evaluated)
+                console.debug(`Cascade message: ${JSON.stringify(messageToSend)}`);
+
+                 // Evaluate the cascaded message, but discard the result
+                 // Need a way to evaluate message sends directly without re-evaluating the receiver
+                 // Let's refine this: evaluate needs to handle pre-evaluated receivers.
+                 // For now, we re-evaluate parts, which is incorrect for cascades.
+
+                 // --- Refined Cascade Logic ---
+                 // Evaluate each message with the *same* receiver
+                 const selector = msg[0];
+                 const argNodes = msg.slice(1);
+
+                 if (typeof selector !== 'string') {
+                     throw new ArgumentError(`Invalid selector in cascade message: ${JSON.stringify(selector)}`);
+                 }
+
+                 const args = argNodes.map(argNode => evaluate(argNode, env));
+                 lookupAndSend(receiver, selector, args, env); // Call lookupAndSend directly
+
+                 // --- End Refined Cascade Logic ---
+
+            }
+            return receiver; // Cascade returns the original receiver
         }
 
-        // Keyword Send: [receiver, "selector:with:", arg1, arg2] (selector must be string ending ':')
-        // Will be handled later in Step 16
-
-        // Assignment: ["var:", expr]
-        // Will be handled later in Step 16
-
-        // Method Definition: ["define:args:body:", selector, ["args"], [body...]]
-        // Will be handled later in Step 16
-
         // Block Closure: [["args"], "=>:", [body...]]
-        // Will be handled later in Step 17
+        // Placeholder for Step 17
 
         // Return Statement: ["^", expr]
-        // Will be handled later in Step 17
+        // Placeholder for Step 17
 
-        // Cascades: ["receiver", "cascade:", [msg1, msg2, ...]]
-        // Will be handled later in Step 16
+        // Method Definition: ["define:args:body:", selector, ["args"], [body...]]
+        // Placeholder for Step 17
+
+
+        // --- Message Sends (after checking special forms) ---
+
+        // Evaluate the receiver first (common to all sends)
+        const receiver = evaluate(first, env);
+
+        // Keyword Send: [receiver, "selector:with:", arg1, arg2] (selector must be string ending ':')
+        // Requires length >= 3 and second element is a string containing ':'
+        if (sonArray.length >= 3 && typeof second === 'string' && second.includes(':')) {
+             const selector = second;
+             const argNodes = sonArray.slice(2);
+             console.debug(`Keyword Send: ${JSON.stringify(first)} >> ${selector} args: ${JSON.stringify(argNodes)}`);
+
+             // Evaluate arguments
+             const args = argNodes.map(argNode => evaluate(argNode, env));
+
+             // Validate argument count against selector parts
+             const selectorParts = selector.split(':').filter(part => part.length > 0);
+             if (selector.endsWith(':') && selectorParts.length !== args.length) {
+                 throw new ArgumentError(`Keyword selector #${selector} expects ${selectorParts.length} arguments, but received ${args.length}.`);
+             }
+             // If selector doesn't end with ':', it's technically invalid Smalltalk keyword syntax
+             if (!selector.endsWith(':')) {
+                console.warn(`Potentially malformed keyword selector (doesn't end with :): ${selector}`);
+                // Proceed anyway for flexibility? Or throw? Let's throw for stricter adherence.
+                throw new ArgumentError(`Malformed keyword selector (must end with ':'): ${selector}`);
+             }
+
+             return lookupAndSend(receiver, selector, args, env);
+        }
+
+        // Binary Send: [receiver, operator, argument] (operator must be string, not containing ':')
+        // Requires length === 3 and second element is a string without ':'
+        if (sonArray.length === 3 && typeof second === 'string' && !second.includes(':')) {
+            const operator = second;
+            const argumentNode = sonArray[2];
+            console.debug(`Binary Send: ${JSON.stringify(first)} ${operator} ${JSON.stringify(argumentNode)}`);
+            const argument = evaluate(argumentNode, env);
+            return lookupAndSend(receiver, operator, [argument], env);
+        }
+
+        // Unary Send: [receiver, selector] (selector must be string, not containing ':')
+        // Requires length === 2 and second element is a string without ':'
+        if (sonArray.length === 2 && typeof second === 'string' && !second.includes(':')) {
+            const selector = second;
+            console.debug(`Unary Send: ${JSON.stringify(first)} >> ${selector}`);
+            return lookupAndSend(receiver, selector, [], env);
+        }
 
         // --- Default to Sequence ---
         // If it's an array and doesn't match known patterns above, treat as a sequence.
+        // Note: Receiver was already evaluated above for potential message sends.
+        // If it's truly a sequence, the first element should just be evaluated normally.
+        // We need to re-evaluate the first element *as part of the sequence* if no message send pattern matched.
+
         console.debug(`Sequence: ${JSON.stringify(sonArray)}`);
-        let lastResult: SonValue = null; // Default result for empty or all-null sequence?
-        for (let i = 0; i < sonArray.length; i++) {
-            // TODO: Handle non-local returns propagating through sequences later.
+        // Re-evaluate the first element since it wasn't used as a receiver in a matched send pattern
+        let lastResult: SonValue = receiver; // Start with the evaluated first element
+        for (let i = 1; i < sonArray.length; i++) {
+            // TODO: Handle non-local returns propagating through sequences later (Step 17).
             lastResult = evaluate(sonArray[i], env);
         }
-        return lastResult;
+        return lastResult; // Return the result of the last statement
     }
 
     // 3. Handle Objects (excluding Symbols already handled)
     if (typeof node === 'object' && node !== null) {
-        // This is a plain JSON object. What does it mean in SON?
-        // - Could be a record/struct like object -> return as is for now.
-        // - Could be used for future SON object representations.
-        // For now, just return the object itself. Message sends *to* these objects
-        // will currently only work if they have matching JS functions as properties.
+        // Plain JSON object - return as is for now.
         return node as SonObject;
     }
 
     // Should not be reachable if SonValue covers all JSON types
-    throw new Error(`Unknown SON node type or structure: ${JSON.stringify(node)}`);
+    console.error("Evaluation failed for node:", JSON.stringify(node));
+    throw new Error(`Unknown or unhandled SON node type/structure: ${Object.prototype.toString.call(node)}`);
 }
